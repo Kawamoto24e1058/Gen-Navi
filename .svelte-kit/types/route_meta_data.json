@@ -1,0 +1,9 @@
+{
+	"/": [],
+	"/api/places/autocomplete": [
+		"src/routes/api/places/autocomplete/+server.js"
+	],
+	"/api/places/details": [
+		"src/routes/api/places/details/+server.js"
+	]
+}

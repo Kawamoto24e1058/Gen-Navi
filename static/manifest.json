@@ -1,0 +1,9 @@
+{
+    "name": "原付ナビ Gen-Navi",
+    "short_name": "原付ナビ",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#ffffff",
+    "theme_color": "#007aff",
+    "icons": []
+}
