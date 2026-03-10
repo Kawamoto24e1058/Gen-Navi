@@ -1,7 +1,7 @@
 <script>
     import { fly } from 'svelte/transition';
     import { AlertTriangle, X } from 'lucide-svelte';
-    import { speak } from '../utils/voice';
+    import { playZundamon } from '../utils/voice';
 
     let { 
         message = "", 
@@ -11,7 +11,7 @@
 
     $effect(() => {
         if (visible && autoSpeak && message) {
-            speak(message);
+            playZundamon(message);
         }
     });
 

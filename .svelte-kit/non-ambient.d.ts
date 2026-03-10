@@ -27,18 +27,23 @@ export {};
 
 declare module "$app/types" {
 	export interface AppTypes {
-		RouteId(): "/" | "/api" | "/api/places" | "/api/places/autocomplete" | "/api/places/details";
+		RouteId(): "/" | "/api" | "/api/ai" | "/api/ai/assess-hazards" | "/api/ai/assess-route" | "/api/places" | "/api/places/autocomplete" | "/api/places/details" | "/api/route" | "/api/voice";
 		RouteParams(): {
 			
 		};
 		LayoutParams(): {
 			"/": Record<string, never>;
 			"/api": Record<string, never>;
+			"/api/ai": Record<string, never>;
+			"/api/ai/assess-hazards": Record<string, never>;
+			"/api/ai/assess-route": Record<string, never>;
 			"/api/places": Record<string, never>;
 			"/api/places/autocomplete": Record<string, never>;
-			"/api/places/details": Record<string, never>
+			"/api/places/details": Record<string, never>;
+			"/api/route": Record<string, never>;
+			"/api/voice": Record<string, never>
 		};
-		Pathname(): "/" | "/api/places/autocomplete" | "/api/places/details";
+		Pathname(): "/" | "/api/ai/assess-hazards" | "/api/ai/assess-route" | "/api/places/autocomplete" | "/api/places/details" | "/api/route" | "/api/voice";
 		ResolvedPathname(): `${"" | `/${string}`}${ReturnType<AppTypes['Pathname']>}`;
 		Asset(): "/manifest.json" | string & {};
 	}

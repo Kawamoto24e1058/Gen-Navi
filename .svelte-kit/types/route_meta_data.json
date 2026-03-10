@@ -1,9 +1,21 @@
 {
 	"/": [],
+	"/api/ai/assess-hazards": [
+		"src/routes/api/ai/assess-hazards/+server.js"
+	],
+	"/api/ai/assess-route": [
+		"src/routes/api/ai/assess-route/+server.js"
+	],
 	"/api/places/autocomplete": [
 		"src/routes/api/places/autocomplete/+server.js"
 	],
 	"/api/places/details": [
 		"src/routes/api/places/details/+server.js"
+	],
+	"/api/route": [
+		"src/routes/api/route/+server.js"
+	],
+	"/api/voice": [
+		"src/routes/api/voice/+server.js"
 	]
 }

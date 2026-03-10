@@ -2,8 +2,10 @@
     import Map from "$lib/components/Map.svelte";
     import SearchBar from "$lib/components/SearchBar.svelte";
     import AlertBanner from "$lib/components/AlertBanner.svelte";
-    import { speak } from "$lib/utils/voice";
-    import { Volume2, Navigation } from "lucide-svelte";
+    import { Volume2, Navigation, LocateFixed, Sun, Moon } from "lucide-svelte";
+    import { onMount } from "svelte";
+    import { browser } from "$app/environment";
+    import { playZundamon, prefetchVoice, stopZundamon } from "$lib/utils/voice";
 
     let alertVisible = $state(false);
     let alertMessage = $state("3車線交差点です。二段階右折禁止の標識に注意してください");
@@ -17,19 +19,280 @@
     let isLoadingLocation = $state(true);
     let routeDistance = $state(0);
     let routeDuration = $state(0);
+    let currentRoute = $state(null);
+    let hazards = $state([]);
+    let announcedHazards = new Set();
+    let spokenGuidance = new Set(); // To track {stepIndex}-{stage}
+    let activeHazard = $state(null);
+    let prohibitedSections = $state([]);
+    let announcedProhibitions = new Set();
+    let activeProhibitedSection = $state(null);
+    let userHeading = $state(0);
+    let currentSpeed = $state(0);
+    let currentStepIndex = $state(0);
+    let isSpeeding = $state(false);
+    let lastSpeedAlertTime = 0;
+    
+    // Automatic Night Mode Detection
+    let isDark = $state(false);
+    let isSensorActive = $state(false);
+    let isManualDarkOverride = $state(false);
+    let recenterToken = $state(0);
+    let sensor = null;
+    
+    onMount(() => {
+        const updateThemeByTime = () => {
+            const hour = new Date().getHours();
+            const isNightTime = hour >= 18 || hour < 6;
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            return isNightTime || prefersDark;
+        };
+
+        // Ambient Light Sensor Logic
+        if (browser && 'AmbientLightSensor' in window) {
+            try {
+                // @ts-ignore - AmbientLightSensor is experimental
+                sensor = new AmbientLightSensor({ frequency: 1 });
+                sensor.addEventListener('reading', () => {
+                    if (isManualDarkOverride) return;
+
+                    const lux = sensor.illuminance;
+                    // Hysteresis: 10 lux to darken, 20 lux to lighten
+                    if (lux < 10) {
+                        isDark = true;
+                    } else if (lux > 20) {
+                        isDark = false;
+                    }
+                    isSensorActive = true;
+                });
+                sensor.addEventListener('error', (event) => {
+                    console.warn('AmbientLightSensor error:', event.error);
+                    isSensorActive = false;
+                    isDark = updateThemeByTime();
+                });
+                sensor.start();
+            } catch (err) {
+                console.warn('AmbientLightSensor failed:', err);
+                isSensorActive = false;
+                isDark = updateThemeByTime();
+            }
+        } else {
+            console.log('AmbientLightSensor not supported, using time-based fallback.');
+            isDark = updateThemeByTime();
+        }
+
+        const interval = setInterval(() => {
+            if (!isSensorActive && !isManualDarkOverride) {
+                isDark = updateThemeByTime();
+            }
+        }, 60000);
+
+        return () => {
+            clearInterval(interval);
+            if (sensor) sensor.stop();
+        };
+    });
+
+    // Sync HTML class for Tailwind dark mode
+    $effect(() => {
+        if (browser) {
+            if (isDark) {
+                document.documentElement.classList.add('dark');
+            } else {
+                document.documentElement.classList.remove('dark');
+            }
+        }
+    });
+
+    // Derived values for Nav UI
+    let nextStep = $derived(currentRoute?.legs?.[0]?.steps?.[currentStepIndex + 1] || null);
+    let distToNextStep = $derived.by(() => {
+        if (!nextStep || userLat === null || userLon === null) return 0;
+        return calculateDistance(userLat, userLon, nextStep.maneuver.location[1], nextStep.maneuver.location[0]);
+    });
+    let etaTime = $derived.by(() => {
+        if (!routeDuration) return "";
+        const now = new Date();
+        const eta = new Date(now.getTime() + routeDuration * 60000);
+        return eta.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    });
+
+    // Context-aware instruction generator (Optimized for speed and conciseness)
+    function formatInstruction(step, stage, hazard) {
+        const roadName = step.name ? step.name.split(' ')[0] : "";
+        const modifier = step.maneuver.modifier;
+        let direction = "";
+        
+        if (modifier === 'right') direction = "右折";
+        else if (modifier === 'left') direction = "左折";
+        else if (modifier.includes('right')) direction = "右方向";
+        else if (modifier.includes('left')) direction = "左方向";
+        else direction = "直進";
+
+        // Concise character phrases
+        if (hazard) {
+            if (hazard.voiceText && stage === 100) return hazard.voiceText;
+            
+            const hazardWarning = `ここは車線が多いのだ！二段階右折をするのだ！`;
+
+            if (stage === 700) return `まもなく${direction}。二段階右折の準備を。`;
+            if (stage === 300) return `300m先${direction}なのだ。${hazardWarning}`;
+            if (stage === 100) return `まもなく${direction}なのだ！二段階右折なのだ！`;
+        }
+
+        if (stage === 700) return `まもなく${roadName}${direction}なのだ`;
+        if (stage === 300) return `300m先${direction}なのだ`;
+        if (stage === 100) return `まもなく${direction}なのだ`;
+        
+        return step.maneuver.instruction;
+    }
 
     $effect(() => {
-        if (userLat !== null && userLon !== null) {
+        if (userLat !== null && userLon !== null && appState === 'NAVIGATING' && currentRoute) {
+            isLoadingLocation = false;
+            
+            // 1. Hazard Alerts (Manual detection/Proximity)
+            hazards.forEach(hazard => {
+                if (announcedHazards.has(hazard.id)) return;
+                const dist = calculateDistance(userLat, userLon, hazard.lat, hazard.lon);
+                if (dist < 0.2) {
+                    activeHazard = hazard;
+                    
+                    // Prioritize AI Voice or construct with reasoning
+                    if (hazard.voiceText) {
+                        playZundamon(hazard.voiceText);
+                    } else {
+                        playZundamon(`ここは車線が多いのだ！二段階右折をするのだ！左端の車線に、寄るのだ！`);
+                    }
+                    
+                    announcedHazards.add(hazard.id);
+                    setTimeout(() => { if (activeHazard?.id === hazard.id) activeHazard = null; }, 10000);
+                }
+            });
+
+            // 2. Prohibited Road Alerts (AI-detected bypasses etc.)
+            prohibitedSections.forEach((section, idx) => {
+                if (announcedProhibitions.has(section.name)) return;
+                const dist = calculateDistance(userLat, userLon, section.start[0], section.start[1]);
+                if (dist < 0.3) {
+                    activeProhibitedSection = section;
+                    playZundamon(`大変なのだ！この先の${section.name}は、原付は通れないのだ！別の道を探すのだ！`);
+                    announcedProhibitions.add(section.name);
+                    setTimeout(() => { if (activeProhibitedSection === section) activeProhibitedSection = null; }, 15000);
+                }
+            });
+
+            // 3. 3-Stage Distance Based Guidance for each step
+            if (currentRoute.legs && currentRoute.legs[0].steps) {
+                const steps = currentRoute.legs[0].steps;
+                steps.forEach((step, idx) => {
+                    if (idx === 0) return; // Skip current step
+
+                    const dist = calculateDistance(userLat, userLon, step.maneuver.location[1], step.maneuver.location[0]);
+                    const hazard = hazards.find(h => h.id.includes(`${step.maneuver.location[1]}-${step.maneuver.location[0]}`));
+
+                    // Update current step index if passed (within 50m)
+                    if (idx === currentStepIndex + 1 && dist < 0.05) {
+                        currentStepIndex = idx;
+                    }
+
+                    // Triggers: 700m, 300m, 100m
+                    [700, 300, 100].forEach(stage => {
+                        const key = `${idx}-${stage}`;
+                        if (spokenGuidance.has(key)) return;
+
+                        // Check distance (km)
+                        if (dist <= (stage / 1000) && dist > ((stage - 50) / 1000)) {
+                            let text = formatInstruction(step, stage, hazard);
+                            playZundamon(text);
+                            spokenGuidance.add(key);
+
+                            // Optimization: Pre-fetch next distance milestones for this step
+                            if (stage === 700) {
+                                prefetchVoice(formatInstruction(step, 300, hazard));
+                                prefetchVoice(formatInstruction(step, 100, hazard));
+                            } else if (stage === 300) {
+                                prefetchVoice(formatInstruction(step, 100, hazard));
+                            }
+                        }
+                    });
+                });
+            }
+
+            // 4. Speed Limit Monitoring (30km/h for 50cc)
+            const speedKmH = currentSpeed * 3.6;
+            if (speedKmH > 30) {
+                isSpeeding = true;
+                const now = Date.now();
+                if (now - lastSpeedAlertTime > 10000) { // Alert every 10s
+                    playZundamon("スピード出しすぎなのだ！落とすのだ！");
+                    lastSpeedAlertTime = now;
+                }
+            } else {
+                isSpeeding = false;
+            }
+
+            // 5. Auto-Reroute Detection (50m deviation)
+            if (currentRoute?.geometry?.coordinates) {
+                const coords = currentRoute.geometry.coordinates;
+                // Find distance to nearest point on route
+                let minDistance = Infinity;
+                for (let i = 0; i < coords.length; i++) {
+                    const d = calculateDistance(userLat, userLon, coords[i][1], coords[i][0]);
+                    if (d < minDistance) minDistance = d;
+                }
+                
+                if (minDistance > 0.05) { // 50m
+                    console.log('Zundamon: Off-route detected! Rerouting...');
+                    const destLatLng = [destination.lat, destination.lon];
+                    const startPos = [userLat, userLon];
+                    // Re-fetch route (Map component will react to destination change if we reset it slightly or re-trigger)
+                    // Better yet, we can trigger the fetch via a shared helper if needed, but since Map reacts to destination,
+                    // we'll just force a refresh.
+                    const originalDest = { ...destination };
+                    destination = null;
+                    setTimeout(() => { 
+                        destination = originalDest;
+                        playZundamon("ルートを外れたのだ。引き返すか、リルートを待つのだ。ルートを再検索したのだ！");
+                    }, 100);
+                }
+            }
+        } else if (userLat !== null && userLon !== null) {
             isLoadingLocation = false;
         }
     });
 
-    function triggerTestVoice() {
-        speak("音声案内のテストです。目的地を設定してください");
+    // Orientation Tracking
+    $effect(() => {
+        if (!browser) return;
+        
+        const handleOrientation = (e) => {
+            // Priority: webkitCompassHeading (iOS/Safari) -> alpha (Android/Chrome)
+            if (e.webkitCompassHeading !== undefined) {
+                userHeading = e.webkitCompassHeading;
+            } else if (e.alpha !== null) {
+                userHeading = 360 - e.alpha;
+            }
+        };
+
+        window.addEventListener('deviceorientation', handleOrientation, true);
+        return () => window.removeEventListener('deviceorientation', handleOrientation);
+    });
+
+
+    function calculateDistance(lat1, lon1, lat2, lon2) {
+        const R = 6371; // km
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLon = (lon2 - lon1) * Math.PI / 180;
+        const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                  Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                  Math.sin(dLon/2) * Math.sin(dLon/2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        return R * c;
     }
 
-    function triggerAlert() {
-        alertVisible = true;
+    function triggerTestVoice() {
+        playZundamon("目的地を、設定するのだ！原付一種専用の、安全なルートを案内するのだ！");
     }
 
     function handleMapError(message) {
@@ -38,6 +301,7 @@
     }
 
     function handleSelectDestination(item) {
+        console.log('Destination selected:', item);
         destination = {
             lat: parseFloat(item.lat),
             lon: parseFloat(item.lon),
@@ -47,14 +311,40 @@
     }
 
     function startNavigation() {
+        if (prohibitedSections.some(s => s.strictness === 'STRICT')) {
+            alertMessage = "ルート上に原付通行禁止区間が含まれています。安全のため、別のルートを検討してください。";
+            alertVisible = true;
+            playZundamon("警告なのだ！ルート上に原付一種が通行できない区間が含まれているのだ。案内を制限するのだ。");
+            return;
+        }
+        
         appState = 'NAVIGATING';
-        // In a real app, we might trigger a specific voice guidance here
-        speak("案内を開始します。実際の交通規制に従って走行してください。");
+        currentStepIndex = 0;
+        playZundamon("安全運転で、案内を開始するのだ！実際の交通規制に、従うのだ！");
     }
 
     function cancelRoute() {
         appState = 'IDLE';
         destination = null;
+        activeHazard = null;
+        activeProhibitedSection = null;
+        announcedHazards.clear();
+        announcedProhibitions.clear();
+        spokenGuidance.clear();
+    }
+
+    function changeDestination() {
+        // Keep destination set but go back to searching state
+        appState = 'SEARCHING';
+    }
+
+    function recenterMap() {
+        recenterToken += 1;
+    }
+
+    function toggleDarkMode() {
+        isDark = !isDark;
+        isManualDarkOverride = true;
     }
 </script>
 
@@ -68,26 +358,147 @@
             bind:duration={routeDuration}
             bind:userLat
             bind:userLon
+            bind:hazards
+            bind:route={currentRoute}
+            bind:prohibitedSections
+            heading={userHeading}
+            isNavigating={appState === 'NAVIGATING'}
+            bind:currentSpeed
+            {isDark}
+            {recenterToken}
         />
     </div>
 
-    <!-- UI Overlay -->
-    {#if appState !== 'NAVIGATING'}
-        <SearchBar 
-            onSelect={handleSelectDestination} 
-            onFocus={() => { if(appState === 'IDLE') appState = 'SEARCHING'; }}
-            onBlur={() => { if(appState === 'SEARCHING' && !destination) appState = 'IDLE'; }}
-            lat={userLat}
-            lon={userLon}
-            {isLoadingLocation}
-        />
+    <!-- Navigation Overlay -->
+    {#if appState === 'NAVIGATING'}
+        <div class="nav-mode-overlay">
+            <!-- Top Guidance Bar -->
+            <div class="nav-guidance-bar">
+                <div class="guidance-icon">
+                    {#if nextStep?.maneuver?.modifier === 'right'}
+                        <Navigation size={48} style="transform: rotate(90deg)" />
+                    {:else if nextStep?.maneuver?.modifier === 'left'}
+                        <Navigation size={48} style="transform: rotate(-90deg)" />
+                    {:else}
+                        <Navigation size={48} />
+                    {/if}
+                </div>
+                <div class="guidance-text">
+                    <span class="guidance-dist">次まで {(distToNextStep * 1000).toFixed(0)}m</span>
+                    <span class="guidance-desc">{nextStep?.maneuver?.instruction || '目的地へ向かうのだ'}</span>
+                </div>
+                {#if isSensorActive}
+                    <div class="sensor-badge">
+                        <span class="sensor-dot"></span>
+                        💡自動
+                    </div>
+                {/if}
+            </div>
+
+            <!-- Bottom Stats Bar -->
+            <div class="nav-stats-bar">
+                <div class="nav-stat-group">
+                    <div class="nav-stat">
+                        <span class="nav-stat-val">{etaTime}</span>
+                        <span class="nav-stat-lbl">到着</span>
+                    </div>
+                    <div class="nav-stat main">
+                        <span class="nav-stat-val highlight">{routeDuration}<small>分</small></span>
+                        <span class="nav-stat-lbl">残り</span>
+                    </div>
+                    <div class="nav-stat">
+                        <span class="nav-stat-val">{routeDistance}<small>km</small></span>
+                        <span class="nav-stat-lbl">距離</span>
+                    </div>
+                </div>
+
+                <!-- Live Speedometer -->
+                <div class="nav-speedometer" class:is-speeding={isSpeeding}>
+                    <span class="speed-val">{Math.round(currentSpeed * 3.6)}</span>
+                    <span class="speed-unit">km/h</span>
+                </div>
+
+                <button class="nav-exit-btn" onclick={cancelRoute}>終了</button>
+            </div>
+        </div>
+
+        <!-- Pop-over Alerts during Navigation -->
+        {#if activeHazard}
+            <div class="hazard-alert-overlay">
+                <div class="hazard-alert-box" class:is-fallback={activeHazard.confidence === 'fallback'}>
+                    <div class="hazard-alert-icon">↩️</div>
+                    <div class="hazard-alert-text">
+                        <span class="hazard-title">{activeHazard.confidence === 'high' ? '二段階右折が必要' : '二段階右折の可能性大'}</span>
+                        <span class="hazard-desc">{activeHazard.confidence === 'high' ? '左端の車線に寄ってください' : '標識を必ず確認してください'}</span>
+                    </div>
+                    <button class="hazard-close" onclick={() => activeHazard = null}>✕</button>
+                </div>
+            </div>
+        {/if}
+
+        {#if activeProhibitedSection}
+            <div class="prohibited-alert-overlay">
+                <div class="prohibited-alert-box">
+                    <div class="prohibited-alert-icon">🚫</div>
+                    <div class="prohibited-alert-text">
+                        <span class="prohibited-title">通行禁止区域 接近</span>
+                        <span class="prohibited-name">{activeProhibitedSection.name}</span>
+                        <span class="prohibited-desc">{activeProhibitedSection.reason}</span>
+                    </div>
+                    <button class="prohibited-close" onclick={() => activeProhibitedSection = null}>✕</button>
+                </div>
+            </div>
+        {/if}
     {/if}
 
-    <AlertBanner bind:visible={alertVisible} message={alertMessage} />
+    <!-- Searching or Route Selection UI -->
+    <div class="top-ui-container" class:hide={appState === 'NAVIGATING'}>
+        {#if !destination || appState === 'SEARCHING'}
+            <SearchBar 
+                onSelect={handleSelectDestination} 
+                onFocus={() => { if(appState === 'IDLE') appState = 'SEARCHING'; }}
+                onBlur={() => { if(appState === 'SEARCHING' && !destination) appState = 'IDLE'; }}
+                lat={userLat}
+                lon={userLon}
+                {isLoadingLocation}
+            />
+        {:else}
+            <!-- Destination Info Card (Top) -->
+            <div class="destination-card">
+                <div class="dest-icon">
+                    <Navigation size={20} />
+                </div>
+                <div class="dest-info">
+                    <span class="dest-label">目的地</span>
+                    <h3 class="dest-name">{destination.name.split(',')[0]}</h3>
+                </div>
+                <div class="dest-actions">
+                    <button class="action-btn change" onclick={changeDestination}>変更</button>
+                    <button class="action-btn cancel" onclick={cancelRoute}>中止</button>
+                </div>
+            </div>
+        {/if}
+    </div>
 
+    <!-- Floating Action Buttons (FAB) -->
+    {#if appState !== 'NAVIGATING'}
+        <div class="fab-container">
+            <button class="fab-btn theme-toggle" onclick={toggleDarkMode} title="テーマ切り替え">
+                {#if isDark}
+                    <Sun size={24} />
+                {:else}
+                    <Moon size={24} />
+                {/if}
+            </button>
+            <button class="fab-btn recenter" onclick={recenterMap} title="現在地に戻る">
+                <LocateFixed size={24} />
+            </button>
+        </div>
+    {/if}
+
+    <!-- Route Overview Panel -->
     {#if appState === 'ROUTE_OVERVIEW'}
         <div class="route-panel-container">
-            <!-- This will be replaced by RoutePanel component shortly -->
             <div class="route-panel">
                 <div class="route-info">
                     <h3>{destination?.name.split(',')[0]}</h3>
@@ -101,20 +512,7 @@
         </div>
     {/if}
 
-    <!-- Controls Overlay -->
-    {#if appState === 'IDLE' || appState === 'NAVIGATING'}
-        <div class="controls-overlay">
-            <button class="control-btn voice-test" onclick={triggerTestVoice}>
-                <Volume2 size={24} />
-                <span>テスト音声</span>
-            </button>
-
-            <button class="control-btn alert-test" onclick={triggerAlert}>
-                <Navigation size={24} />
-                <span>アラート検証</span>
-            </button>
-        </div>
-    {/if}
+    <AlertBanner bind:visible={alertVisible} message={alertMessage} />
 
     <!-- Right-side margin for ergonomic swiping -->
     <div class="right-margin-safe-area"></div>
@@ -145,43 +543,6 @@
         height: 100%;
     }
 
-    .controls-overlay {
-        position: absolute;
-        bottom: 30px;
-        left: 20px;
-        z-index: 1000;
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-    }
-
-    .control-btn {
-        background: white;
-        border: none;
-        border-radius: 12px;
-        padding: 12px 16px;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
-        font-weight: 600;
-        color: #333;
-        cursor: pointer;
-        transition: transform 0.1s;
-    }
-
-    .control-btn:active {
-        transform: scale(0.95);
-    }
-
-    .voice-test {
-        color: #007aff;
-    }
-
-    .alert-test {
-        color: #ff3b30;
-    }
-
     /* Requirement: Right-side margin for easy scrolling/swiping */
     .right-margin-safe-area {
         position: absolute;
@@ -199,8 +560,201 @@
         pointer-events: none; /* Allow events through? User said "余白を確保". Usually means keep it empty of UI. */
     }
 
-    .app-container.is-navigating .controls-overlay {
-        bottom: 20px;
+
+    /* Professional Navigation Mode Styles */
+    .nav-mode-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        padding: 16px;
+        padding-right: 45px;
+        box-sizing: border-box;
+        z-index: 4000;
+    }
+
+    .nav-guidance-bar {
+        position: relative;
+        background: #1c1c1e;
+        color: white;
+        border-radius: 20px;
+        padding: 24px;
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+        pointer-events: auto;
+        animation: slide-down 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+
+    @keyframes slide-down {
+        from { transform: translateY(-100%); opacity: 0; }
+        to { transform: translateY(0); opacity: 1; }
+    }
+
+    .guidance-icon {
+        width: 64px;
+        height: 64px;
+        background: #34c759;
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+    }
+
+    .guidance-text {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .guidance-dist {
+        font-size: 24px;
+        font-weight: 800;
+        color: #34c759;
+    }
+
+    .guidance-desc {
+        font-size: 18px;
+        font-weight: 600;
+        opacity: 0.9;
+    }
+
+    .nav-stats-bar {
+        background: white;
+        border-radius: 24px;
+        padding: 16px 24px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        box-shadow: 0 -10px 40px rgba(0,0,0,0.1);
+        pointer-events: auto;
+        animation: slide-up 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+
+    .nav-stat-group {
+        display: flex;
+        gap: 24px;
+        align-items: center;
+    }
+
+    .nav-stat {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+    }
+
+    .nav-stat-val {
+        font-size: 17px;
+        font-weight: 700;
+        color: #1c1c1e;
+    }
+
+    .nav-stat-val.highlight {
+        font-size: 24px;
+        color: #34c759;
+    }
+
+    .nav-stat-val small {
+        font-size: 12px;
+        margin-left: 1px;
+    }
+
+    .nav-stat-lbl {
+        font-size: 11px;
+        font-weight: 700;
+        color: #8e8e93;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .nav-exit-btn {
+        background: #f2f2f7;
+        color: #ff3b30;
+        border: none;
+        border-radius: 14px;
+        padding: 12px 18px;
+        font-size: 14px;
+        font-weight: 700;
+        cursor: pointer;
+    }
+
+    .nav-speedometer {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        background: #f2f2f7;
+        padding: 8px 16px;
+        border-radius: 16px;
+        min-width: 70px;
+    }
+
+    .nav-speedometer.is-speeding {
+        background: #ff3b30;
+        color: white;
+        animation: flash-red 0.5s infinite alternate;
+    }
+
+    .nav-speedometer .speed-val {
+        font-size: 24px;
+        font-weight: 900;
+        line-height: 1;
+    }
+
+    .nav-speedometer .speed-unit {
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+    }
+
+    @keyframes flash-red {
+        from { opacity: 1; transform: scale(1); }
+        to { opacity: 0.8; transform: scale(1.05); }
+    }
+
+    /* Hide utilities */
+    .top-ui-container.hide {
+        pointer-events: none;
+        opacity: 0;
+        transform: translateY(-20px);
+        transition: all 0.3s;
+    }
+
+    /* Sensor Badge */
+    .sensor-badge {
+        position: absolute;
+        top: 10px;
+        right: 15px;
+        background: rgba(255, 255, 255, 0.1);
+        padding: 4px 8px;
+        border-radius: 12px;
+        font-size: 10px;
+        font-weight: 700;
+        color: #34c759;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        backdrop-filter: blur(4px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .sensor-dot {
+        width: 6px;
+        height: 6px;
+        background: #34c759;
+        border-radius: 50%;
+        animation: pulse-green 2s infinite;
+    }
+
+    @keyframes pulse-green {
+        0% { transform: scale(1); opacity: 1; }
+        50% { transform: scale(1.3); opacity: 0.5; }
+        100% { transform: scale(1); opacity: 1; }
     }
 
     .route-panel-container {
@@ -250,37 +804,309 @@
         gap: 10px;
     }
 
-    .start-btn {
-        flex: 2;
-        background: #007aff;
-        color: white;
-        border: none;
-        border-radius: 12px;
-        padding: 14px;
-        font-size: 17px;
+    .top-ui-container {
+        position: absolute;
+        top: 20px;
+        left: 0;
+        width: 100%;
+        padding: 0 20px;
+        padding-right: 45px;
+        box-sizing: border-box;
+        z-index: 3000;
+        pointer-events: none;
+    }
+
+    .top-ui-container > :global(*) {
+        pointer-events: auto;
+    }
+
+    .destination-card {
+        background: white;
+        border-radius: 16px;
+        padding: 16px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.12);
+        animation: fade-in 0.3s ease-out;
+    }
+
+    @keyframes fade-in {
+        from { opacity: 0; transform: translateY(-10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+
+    .dest-icon {
+        width: 40px;
+        height: 40px;
+        background: #f2f2f7;
+        color: #007aff;
+        border-radius: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+    }
+
+    .dest-info {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .dest-label {
+        font-size: 11px;
         font-weight: 700;
+        color: #8e8e93;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        display: block;
+    }
+
+    .dest-name {
+        margin: 0;
+        font-size: 16px;
+        color: #1c1c1e;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .dest-actions {
+        display: flex;
+        gap: 8px;
+    }
+
+    .action-btn {
+        padding: 8px 16px;
+        border-radius: 10px;
+        font-size: 14px;
+        font-weight: 600;
+        border: none;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+
+    .action-btn.change {
+        background: #f2f2f7;
+        color: #007aff;
+    }
+
+    .action-btn.cancel {
+        background: #fff1f0;
+        color: #ff3b30;
+    }
+
+    .action-btn.change:hover { background: #e5e5ea; }
+    .action-btn.cancel:hover { background: #fee2e2; }
+
+    .hazard-alert-overlay {
+        position: absolute;
+        top: 100px;
+        left: 0;
+        width: 100%;
+        display: flex;
+        justify-content: center;
+        padding: 0 20px;
+        box-sizing: border-box;
+        z-index: 4000;
+        pointer-events: none;
+    }
+
+    .hazard-alert-box {
+        background: #ff3b30;
+        color: white;
+        border-radius: 16px;
+        padding: 16px 20px;
+        display: flex;
+        align-items: center;
+        gap: 15px;
+        box-shadow: 0 10px 40px rgba(255, 59, 48, 0.4);
+        pointer-events: auto;
+        animation: pulse-alert 1.5s infinite alternate ease-in-out;
+        max-width: 400px;
+        width: 100%;
+    }
+
+    @keyframes pulse-alert {
+        from { transform: scale(1); box-shadow: 0 10px 40px rgba(255, 59, 48, 0.4); }
+        to { transform: scale(1.03); box-shadow: 0 10px 50px rgba(255, 59, 48, 0.6); }
+    }
+
+    .hazard-alert-box.is-fallback {
+        background: #ff9500; /* Orange for warning/fallback */
+        box-shadow: 0 10px 40px rgba(255, 149, 0, 0.4);
+    }
+
+    .hazard-alert-icon {
+        font-size: 32px;
+        background: white;
+        width: 50px;
+        height: 50px;
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+    }
+
+    .hazard-alert-text {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+    }
+
+    .hazard-title {
+        font-size: 18px;
+        font-weight: 800;
+        letter-spacing: -0.5px;
+    }
+
+    .hazard-desc {
+        font-size: 13px;
+        font-weight: 500;
+        opacity: 0.9;
+    }
+
+    .hazard-close {
+        background: rgba(255,255,255,0.2);
+        border: none;
+        color: white;
+        width: 30px;
+        height: 30px;
+        border-radius: 50%;
+        font-size: 16px;
         cursor: pointer;
     }
 
-    .cancel-btn {
-        flex: 1;
-        background: #f2f2f7;
-        color: #1c1c1e;
-        border: none;
+    .prohibited-alert-overlay {
+        position: absolute;
+        top: 180px;
+        left: 0;
+        width: 100%;
+        display: flex;
+        justify-content: center;
+        padding: 0 20px;
+        box-sizing: border-box;
+        z-index: 4500;
+        pointer-events: none;
+    }
+
+    .prohibited-alert-box {
+        background: #1c1c1e;
+        color: #ff3b30;
+        border: 2px solid #ff3b30;
+        border-radius: 16px;
+        padding: 16px 20px;
+        display: flex;
+        align-items: center;
+        gap: 15px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+        pointer-events: auto;
+        animation: shake 0.5s ease-in-out infinite;
+        max-width: 400px;
+        width: 100%;
+    }
+
+    @keyframes shake {
+        0%, 100% { transform: translateX(0); }
+        25% { transform: translateX(-5px); }
+        75% { transform: translateX(5px); }
+    }
+
+    .prohibited-alert-icon {
+        font-size: 32px;
+        background: #ff3b30;
+        color: white;
+        width: 50px;
+        height: 50px;
         border-radius: 12px;
-        padding: 14px;
-        font-size: 17px;
-        font-weight: 600;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+    }
+
+    .prohibited-alert-text {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+    }
+
+    .prohibited-title {
+        font-size: 14px;
+        font-weight: 700;
+        color: #ff3b30;
+        text-transform: uppercase;
+    }
+
+    .prohibited-name {
+        font-size: 18px;
+        font-weight: 800;
+        color: white;
+    }
+
+    .prohibited-desc {
+        font-size: 13px;
+        font-weight: 500;
+        color: #8e8e93;
+    }
+
+    .prohibited-close {
+        background: rgba(255,255,255,0.1);
+        border: none;
+        color: white;
+        width: 30px;
+        height: 30px;
+        border-radius: 50%;
+        font-size: 16px;
         cursor: pointer;
     }
 
     @media (max-width: 600px) {
-        .control-btn span {
-            display: none;
-        }
-        .control-btn {
-            padding: 14px;
-            border-radius: 50%;
-        }
+        /* Mobile specific tweaks can go here */
+    }
+
+    /* FAB Styles */
+    .fab-container {
+        position: absolute;
+        bottom: 32px;
+        right: 45px; /* Adjusting for right margin safe area + padding */
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        z-index: 1000;
+    }
+
+    .fab-btn {
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+        border: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        background: white;
+        color: #1c1c1e;
+    }
+
+    :global(.dark) .fab-btn {
+        background: #1f2937; /* bg-gray-800 */
+        color: white;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    }
+
+    .fab-btn:active {
+        transform: scale(0.9);
+    }
+
+    .fab-btn.recenter {
+        color: #007aff;
+    }
+
+    :global(.dark) .fab-btn.recenter {
+        color: #0a84ff;
     }
 </style>

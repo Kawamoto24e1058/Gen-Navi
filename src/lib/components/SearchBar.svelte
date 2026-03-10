@@ -28,6 +28,7 @@
         try {
             // Fetch from internal SvelteKit API proxy to avoid CORS
             const url = `/api/places/autocomplete?input=${encodeURIComponent(q)}&lat=${lat}&lon=${lon}`;
+            console.log('Fetching Autocomplete:', url);
 
             const response = await fetch(url);
             if (!response.ok) {
@@ -71,6 +72,7 @@
         try {
             // Get coordinates from internal Details proxy
             const detailsUrl = `/api/places/details?place_id=${item.place_id}`;
+            console.log('Fetching Details:', detailsUrl);
             const response = await fetch(detailsUrl);
             const data = await response.json();
             
