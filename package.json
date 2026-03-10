@@ -21,5 +21,8 @@
   "dependencies": {
     "leaflet": "^1.9.4",
     "lucide-svelte": "^0.460.0"
+  },
+  "engines": {
+    "node": "20.x"
   }
 }
