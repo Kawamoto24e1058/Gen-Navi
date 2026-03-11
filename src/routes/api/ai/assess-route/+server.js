@@ -1,11 +1,33 @@
 import { json } from '@sveltejs/kit';
-import { Maps_API_KEY } from '$env/static/private';
-
-const GEMINI_API_KEY = Maps_API_KEY; 
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+import { env } from '$env/dynamic/private';
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 /** @type {import('./$types').RequestHandler} */
 export async function POST({ request }) {
+    let apiKey = env.GEMINI_API_KEY;
+    if (!apiKey && typeof process !== 'undefined') {
+        apiKey = process.env.GEMINI_API_KEY;
+    }
+
+    if (!apiKey) {
+        console.error('GEMINI_API_KEY is not defined in environment variables.');
+        return json({ error: 'API Key missing' }, { status: 500 });
+    }
+
+    // Clean the key (trim whitespace and remove accidental quotes)
+    apiKey = apiKey.trim().replace(/^["']|["']$/g, '');
+    
+    console.log(`[DEBUG] Using API Key (length: ${apiKey.length}, starts with: ${apiKey.substring(0, 5)}...)`);
+
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ 
+        model: "gemini-2.0-flash",
+        generationConfig: { 
+            responseMimeType: "application/json",
+            temperature: 0.1
+        }
+    });
+
     try {
         const { hazards, routeSteps } = await request.json();
 
@@ -47,28 +69,9 @@ Hazards (右折地点): ${JSON.stringify(simplifiedHazards)}
 Steps (全道路名): ${JSON.stringify(routeSteps.map(s => s.name).filter(n => n))}
 `;
 
-        const response = await fetch(GEMINI_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: { 
-                    response_mime_type: "application/json",
-                    temperature: 0.1
-                }
-            })
-        });
-
-        if (!response.ok) {
-            const errBody = await response.text();
-            if (response.status === 403) {
-                return json({ hazards: [], prohibitedSections: [], warning: 'Gemini API is disabled.' });
-            }
-            throw new Error(`Gemini API HTTP ${response.status}: ${errBody}`);
-        }
-
-        const data = await response.json();
-        const aiResult = JSON.parse(data.candidates[0].content.parts[0].text);
+        const result = await model.generateContent(prompt);
+        const aiResultText = result.response.text();
+        const aiResult = JSON.parse(aiResultText);
 
         // 3. Map AI 'prohibited' results to coordinates from OSRM steps
         const prohibitedSections = [];

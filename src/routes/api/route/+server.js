@@ -1,8 +1,4 @@
 import { json } from '@sveltejs/kit';
-import { Maps_API_KEY } from '$env/static/private';
-
-const GEMINI_API_KEY = Maps_API_KEY; 
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
 
 /** @type {import('./$types').RequestHandler} */
 export async function GET({ url }) {

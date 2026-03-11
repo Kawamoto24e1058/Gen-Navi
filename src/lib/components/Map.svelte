@@ -15,6 +15,7 @@
         prohibitedSections = $bindable([]),
         heading = 0,
         isNavigating = false,
+        isHeadingUp = false,
         currentSpeed = $bindable(0),
         isDark = false,
         recenterToken = 0
@@ -42,7 +43,7 @@
     let activeMap = $state(null);
 
     async function fetchRoute(start, end) {
-        const url = `/api/route?start=${start[1]},${start[0]}&end=${end[1]},${end[0]}`;
+        const url = `/api/route?start=${start[1]},${start[0]}&end=${end[1]},${end[0]}&steps=true`;
         try {
             const response = await fetch(url);
             const data = await response.json();
@@ -436,6 +437,9 @@
             hazards = [];
             prohibitedSections = [];
             route = null;
+            if (userLat !== null && userLon !== null) {
+                activeMap.flyTo([userLat, userLon], 15, { animate: true });
+            }
         }
     });
 
@@ -443,11 +447,12 @@
     $effect(() => {
         if (activeMap && browser) {
             const container = activeMap.getContainer();
-            if (isNavigating) {
+            if (isNavigating && isHeadingUp) {
                 container.style.transform = `rotate(${-heading}deg)`;
                 container.style.transition = 'transform 0.1s ease-out';
             } else {
                 container.style.transform = 'rotate(0deg)';
+                container.style.transition = 'transform 0.3s ease-in-out';
             }
         }
     });

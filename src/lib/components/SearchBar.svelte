@@ -2,7 +2,7 @@
     import { Search, Mic, MapPin, Loader2 } from 'lucide-svelte';
     import { onMount } from 'svelte';
 
-    let { onSelect, onFocus, onBlur, lat = null, lon = null, isLoadingLocation = true } = $props();
+    let { onSelect, onFocus, onBlur } = $props();
 
     let query = $state('');
     let results = $state([]);
@@ -16,26 +16,19 @@
             return;
         }
 
-        // Debug: Check if coordinates are arriving correctly
-        console.log('Current Search Location:', lat, lon);
-
-        if (isLoadingLocation || lat === null || lon === null) {
-            console.warn('Search blocked: User location not available.');
-            return;
-        }
-
         isSearching = true;
         try {
-            // Fetch from internal SvelteKit API proxy to avoid CORS
-            const url = `/api/places/autocomplete?input=${encodeURIComponent(q)}&lat=${lat}&lon=${lon}`;
-            console.log('Fetching Autocomplete:', url);
+            // Fetch from internal SvelteKit API proxy for Yahoo! API
+            const url = `/api/search?q=${encodeURIComponent(q)}`;
+            console.log('Fetching Yahoo Search:', url);
 
             const response = await fetch(url);
             if (!response.ok) {
                 throw new Error(`Proxy error: ${response.status}`);
             }
             const data = await response.json();
-            results = data.predictions || [];
+            // Yahoo API returns features in Feature array
+            results = data.Feature || [];
         } catch (error) {
             console.error('Search error:', error);
             results = [];
@@ -50,14 +43,10 @@
         
         if (query) {
             showDropdown = true;
-            if (isLoadingLocation) {
-                // If location is missing, we don't even trigger the debounce search
-                results = [];
-                return;
-            }
+            // 500ms debounce as requested
             debounceTimer = setTimeout(() => {
                 searchPlaces(query);
-            }, 300);
+            }, 500);
         } else {
             showDropdown = false;
             results = [];
@@ -65,33 +54,29 @@
     }
 
     async function selectResult(item) {
-        query = item.structured_formatting.main_text;
+        query = item.Name;
         showDropdown = false;
         
-        isSearching = true;
         try {
-            // Get coordinates from internal Details proxy
-            const detailsUrl = `/api/places/details?place_id=${item.place_id}`;
-            console.log('Fetching Details:', detailsUrl);
-            const response = await fetch(detailsUrl);
-            const data = await response.json();
-            
-            if (data.status === 'OK' && data.result.geometry) {
-                const location = data.result.geometry.location;
-                // Transition to overview via parent handler
+            // Yahoo API returns coordinates as "lon,lat" string
+            const coordString = item.Geometry?.Coordinates;
+            if (coordString) {
+                const [lonStr, latStr] = coordString.split(',');
+                const latVal = parseFloat(latStr);
+                const lonVal = parseFloat(lonStr);
+
+                // Transition to overview via parent handler with correctly mapped coordinates
                 onSelect({
-                    lat: location.lat,
-                    lon: location.lng,
-                    display_name: item.description
+                    lat: latVal,
+                    lon: lonVal,
+                    display_name: `${item.Name} (${item.Property?.Address || ''})`
                 });
             } else {
-                throw new Error('Could not retrieve place details');
+                throw new Error('Could not retrieve coordinates from Yahoo API');
             }
         } catch (error) {
-            console.error('Details error:', error);
-            alert('場所の詳細を取得できませんでした。');
-        } finally {
-            isSearching = false;
+            console.error('Selection error:', error);
+            alert('場所の情報を取得できませんでした。');
         }
     }
 </script>
@@ -106,20 +91,12 @@
         
         <input 
             type="text" 
-            placeholder={!isLoadingLocation ? "目的地を検索（例: コンビニ）" : "現在地を取得中..."} 
+            placeholder="目的地を検索（例: コンビニ）" 
             bind:value={query}
             oninput={handleInput}
             onfocus={onFocus}
             onblur={() => setTimeout(() => { showDropdown = false; onBlur(); }, 200)} 
-            disabled={isLoadingLocation}
         />
-        
-        {#if isLoadingLocation}
-            <div class="location-status">
-                <Loader2 size={14} class="animate-spin" />
-                <span>現在地を取得中...</span>
-            </div>
-        {/if}
         
         <button class="mic-btn">
             <Mic size={20} />
@@ -140,9 +117,9 @@
                 >
                     <MapPin size={18} class="result-icon" />
                     <div class="result-text">
-                        <span class="result-name">{item.structured_formatting.main_text}</span>
+                        <span class="result-name">{item.Name}</span>
                         <span class="result-sub">
-                            {item.structured_formatting.secondary_text}
+                            {item.Property?.Address || ''}
                         </span>
                     </div>
                 </div>
@@ -244,22 +221,5 @@
         color: #007aff;
         padding: 8px;
         cursor: pointer;
-    }
-
-    .location-status {
-        position: absolute;
-        top: 60px;
-        left: 0;
-        background: rgba(0, 122, 255, 0.9);
-        color: white;
-        padding: 6px 12px;
-        border-radius: 20px;
-        font-size: 12px;
-        font-weight: 600;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
-        pointer-events: auto;
     }
 </style>

@@ -2,7 +2,7 @@
     import Map from "$lib/components/Map.svelte";
     import SearchBar from "$lib/components/SearchBar.svelte";
     import AlertBanner from "$lib/components/AlertBanner.svelte";
-    import { Volume2, Navigation, LocateFixed, Sun, Moon } from "lucide-svelte";
+    import { Volume2, Navigation, LocateFixed, Sun, Moon, Compass, X } from "lucide-svelte";
     import { onMount } from "svelte";
     import { browser } from "$app/environment";
     import { playZundamon, prefetchVoice, stopZundamon } from "$lib/utils/voice";
@@ -29,7 +29,7 @@
     let activeProhibitedSection = $state(null);
     let userHeading = $state(0);
     let currentSpeed = $state(0);
-    let currentStepIndex = $state(0);
+    let nextStepIndex = $state(1);
     let isSpeeding = $state(false);
     let lastSpeedAlertTime = 0;
     
@@ -38,6 +38,7 @@
     let isSensorActive = $state(false);
     let isManualDarkOverride = $state(false);
     let recenterToken = $state(0);
+    let isHeadingUp = $state(false); // Map rotation state
     let sensor = null;
     
     onMount(() => {
@@ -105,7 +106,8 @@
     });
 
     // Derived values for Nav UI
-    let nextStep = $derived(currentRoute?.legs?.[0]?.steps?.[currentStepIndex + 1] || null);
+    let routeSteps = $derived(currentRoute?.legs?.[0]?.steps || []);
+    let nextStep = $derived(routeSteps[nextStepIndex] || null);
     let distToNextStep = $derived.by(() => {
         if (!nextStep || userLat === null || userLon === null) return 0;
         return calculateDistance(userLat, userLon, nextStep.maneuver.location[1], nextStep.maneuver.location[0]);
@@ -117,34 +119,56 @@
         return eta.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     });
 
-    // Context-aware instruction generator (Optimized for speed and conciseness)
-    function formatInstruction(step, stage, hazard) {
-        const roadName = step.name ? step.name.split(' ')[0] : "";
+    function formatDistance(meters) {
+        if (meters >= 1000) {
+            return (meters / 1000).toFixed(1) + 'km';
+        }
+        return Math.round(meters) + 'm';
+    }
+
+    // Google Maps style translation for OSRM maneuvers
+    function translateManeuver(step) {
+        if (!step) return "目的地へ向かう";
         const modifier = step.maneuver.modifier;
-        let direction = "";
+        const type = step.maneuver.type;
+
+        let text = "";
+        let symbol = "";
+
+        switch (modifier) {
+            case 'left': text = "左折"; symbol = "↖︎"; break;
+            case 'right': text = "右折"; symbol = "↗︎"; break;
+            case 'slight left': text = "斜め左"; symbol = "↖︎"; break;
+            case 'slight right': text = "斜め right"; symbol = "↗︎"; break;
+            case 'sharp left': text = "左に鋭角"; symbol = "↖︎"; break;
+            case 'sharp right': text = "右に鋭角"; symbol = "↗︎"; break;
+            case 'uturn': text = "Uターン"; symbol = "↶"; break;
+            case 'straight': text = "直進"; symbol = "↑"; break;
+            default: 
+                if (type === 'continue') { text = "道なり"; symbol = "↑"; }
+                else if (type === 'arrive') { text = "目的地に到着"; symbol = "🏁"; }
+                else { text = "直進"; symbol = "↑"; }
+                break;
+        }
+        return `${text} ${symbol}`;
+    }
+
+    // Context-aware instruction generator (Optimized for Zundamon)
+    function formatInstruction(step, stage, hazard) {
+        const maneuverText = translateManeuver(step).split(' ')[0]; // Use text only for voice
         
-        if (modifier === 'right') direction = "右折";
-        else if (modifier === 'left') direction = "左折";
-        else if (modifier.includes('right')) direction = "右方向";
-        else if (modifier.includes('left')) direction = "左方向";
-        else direction = "直進";
-
-        // Concise character phrases
+        // Hazard special handling
         if (hazard) {
-            if (hazard.voiceText && stage === 100) return hazard.voiceText;
-            
+            if (hazard.voiceText && stage === 50) return hazard.voiceText;
             const hazardWarning = `ここは車線が多いのだ！二段階右折をするのだ！`;
-
-            if (stage === 700) return `まもなく${direction}。二段階右折の準備を。`;
-            if (stage === 300) return `300m先${direction}なのだ。${hazardWarning}`;
-            if (stage === 100) return `まもなく${direction}なのだ！二段階右折なのだ！`;
+            if (stage === 300) return `およそ300メートル先、${maneuverText}なのだ。${hazardWarning}`;
+            if (stage === 50) return `まもなく、${maneuverText}なのだ！二段階右折なのだ！`;
         }
 
-        if (stage === 700) return `まもなく${roadName}${direction}なのだ`;
-        if (stage === 300) return `300m先${direction}なのだ`;
-        if (stage === 100) return `まもなく${direction}なのだ`;
+        if (stage === 300) return `およそ300メートル先、${maneuverText}なのだ`;
+        if (stage === 50) return `まもなく、${maneuverText}なのだ`;
         
-        return step.maneuver.instruction;
+        return maneuverText + "なのだ";
     }
 
     $effect(() => {
@@ -182,40 +206,28 @@
                 }
             });
 
-            // 3. 3-Stage Distance Based Guidance for each step
-            if (currentRoute.legs && currentRoute.legs[0].steps) {
-                const steps = currentRoute.legs[0].steps;
-                steps.forEach((step, idx) => {
-                    if (idx === 0) return; // Skip current step
+            // 3. Distance Based Guidance (Turn-by-turn)
+            if (routeSteps.length > 0 && nextStepIndex < routeSteps.length) {
+                const step = routeSteps[nextStepIndex];
+                const dist = calculateDistance(userLat, userLon, step.maneuver.location[1], step.maneuver.location[0]);
+                const hazard = hazards.find(h => h.id.includes(`${step.maneuver.location[1]}-${step.maneuver.location[0]}`));
 
-                    const dist = calculateDistance(userLat, userLon, step.maneuver.location[1], step.maneuver.location[0]);
-                    const hazard = hazards.find(h => h.id.includes(`${step.maneuver.location[1]}-${step.maneuver.location[0]}`));
+                // Proximity trigger to next step (30m for Google Maps style)
+                if (dist < 0.03) {
+                    nextStepIndex++;
+                    spokenGuidance.clear(); // Reset voice flags for new step
+                }
 
-                    // Update current step index if passed (within 50m)
-                    if (idx === currentStepIndex + 1 && dist < 0.05) {
-                        currentStepIndex = idx;
+                // Guidance milestones: 300m, 50m
+                [300, 50].forEach(stage => {
+                    const key = `${nextStepIndex}-${stage}`;
+                    if (spokenGuidance.has(key)) return;
+
+                    if (dist <= (stage / 1000) && dist > ((stage - 30) / 1000)) {
+                        let text = formatInstruction(step, stage, hazard);
+                        playZundamon(text);
+                        spokenGuidance.add(key);
                     }
-
-                    // Triggers: 700m, 300m, 100m
-                    [700, 300, 100].forEach(stage => {
-                        const key = `${idx}-${stage}`;
-                        if (spokenGuidance.has(key)) return;
-
-                        // Check distance (km)
-                        if (dist <= (stage / 1000) && dist > ((stage - 50) / 1000)) {
-                            let text = formatInstruction(step, stage, hazard);
-                            playZundamon(text);
-                            spokenGuidance.add(key);
-
-                            // Optimization: Pre-fetch next distance milestones for this step
-                            if (stage === 700) {
-                                prefetchVoice(formatInstruction(step, 300, hazard));
-                                prefetchVoice(formatInstruction(step, 100, hazard));
-                            } else if (stage === 300) {
-                                prefetchVoice(formatInstruction(step, 100, hazard));
-                            }
-                        }
-                    });
                 });
             }
 
@@ -255,6 +267,13 @@
                         destination = originalDest;
                         playZundamon("ルートを外れたのだ。引き返すか、リルートを待つのだ。ルートを再検索したのだ！");
                     }, 100);
+                }
+            }
+            // 6. Arrival Detection (Auto-end)
+            if (destination) {
+                const distToDest = calculateDistance(userLat, userLon, destination.lat, destination.lon);
+                if (distToDest < 0.03) { // 30m
+                    endNavigation(true);
                 }
             }
         } else if (userLat !== null && userLon !== null) {
@@ -319,18 +338,30 @@
         }
         
         appState = 'NAVIGATING';
-        currentStepIndex = 0;
+        nextStepIndex = 1; // Start from first maneuver
         playZundamon("安全運転で、案内を開始するのだ！実際の交通規制に、従うのだ！");
     }
 
-    function cancelRoute() {
+    function endNavigation(arrived = false) {
+        if (arrived) {
+            playZundamon("目的地に到着したのだ！お疲れ様なのだ！");
+        } else {
+            stopZundamon();
+        }
+
         appState = 'IDLE';
         destination = null;
+        nextStepIndex = 1; // Reset progression
+        isHeadingUp = false; // Reset rotation to North-up
         activeHazard = null;
         activeProhibitedSection = null;
         announcedHazards.clear();
         announcedProhibitions.clear();
         spokenGuidance.clear();
+    }
+
+    function cancelRoute() {
+        endNavigation(false);
     }
 
     function changeDestination() {
@@ -345,6 +376,15 @@
     function toggleDarkMode() {
         isDark = !isDark;
         isManualDarkOverride = true;
+    }
+
+    function toggleHeadingUp() {
+        isHeadingUp = !isHeadingUp;
+        if (isHeadingUp) {
+            playZundamon("ヘディングアップに切り替えたのだ。進行方向が上になるのだ。");
+        } else {
+            playZundamon("ノースアップに戻したのだ。北が上になるのだ。");
+        }
     }
 </script>
 
@@ -363,6 +403,7 @@
             bind:prohibitedSections
             heading={userHeading}
             isNavigating={appState === 'NAVIGATING'}
+            {isHeadingUp}
             bind:currentSpeed
             {isDark}
             {recenterToken}
@@ -375,17 +416,23 @@
             <!-- Top Guidance Bar -->
             <div class="nav-guidance-bar">
                 <div class="guidance-icon">
-                    {#if nextStep?.maneuver?.modifier === 'right'}
+                    {#if nextStep?.maneuver?.modifier === 'right' || nextStep?.maneuver?.modifier === 'slight right' || nextStep?.maneuver?.modifier === 'sharp right'}
                         <Navigation size={48} style="transform: rotate(90deg)" />
-                    {:else if nextStep?.maneuver?.modifier === 'left'}
+                    {:else if nextStep?.maneuver?.modifier === 'left' || nextStep?.maneuver?.modifier === 'slight left' || nextStep?.maneuver?.modifier === 'sharp left'}
                         <Navigation size={48} style="transform: rotate(-90deg)" />
+                    {:else if nextStep?.maneuver?.modifier === 'uturn'}
+                        <Navigation size={48} style="transform: rotate(180deg)" />
                     {:else}
                         <Navigation size={48} />
                     {/if}
                 </div>
                 <div class="guidance-text">
-                    <span class="guidance-dist">次まで {(distToNextStep * 1000).toFixed(0)}m</span>
-                    <span class="guidance-desc">{nextStep?.maneuver?.instruction || '目的地へ向かうのだ'}</span>
+                    <span class="guidance-main">
+                        {formatDistance(distToNextStep * 1000)}先、{translateManeuver(nextStep)}
+                    </span>
+                    {#if nextStep?.name}
+                        <span class="guidance-subtext">{nextStep.name}</span>
+                    {/if}
                 </div>
                 {#if isSensorActive}
                     <div class="sensor-badge">
@@ -479,6 +526,23 @@
             </div>
         {/if}
     </div>
+
+    <!-- Navigation-specific FABs (Compass/Rotation) -->
+    {#if appState === 'NAVIGATING'}
+        <div class="nav-fab-container">
+            <button 
+                class="fab-btn compass-toggle" 
+                class:active={isHeadingUp}
+                onclick={toggleHeadingUp} 
+                title="地図回転切り替え"
+            >
+                <Compass size={24} style={isHeadingUp ? `transform: rotate(${-userHeading}deg)` : ''} />
+            </button>
+            <button class="fab-btn exit-nav" onclick={() => endNavigation(false)} title="ナビ終了">
+                <X size={24} />
+            </button>
+        </div>
+    {/if}
 
     <!-- Floating Action Buttons (FAB) -->
     {#if appState !== 'NAVIGATING'}
@@ -613,16 +677,19 @@
         flex-direction: column;
     }
 
-    .guidance-dist {
-        font-size: 24px;
+    .guidance-main {
+        font-size: 20px;
         font-weight: 800;
         color: #34c759;
+        line-height: 1.2;
     }
 
-    .guidance-desc {
-        font-size: 18px;
+    .guidance-subtext {
+        font-size: 16px;
         font-weight: 600;
-        opacity: 0.9;
+        color: white;
+        opacity: 0.8;
+        margin-top: 2px;
     }
 
     .nav-stats-bar {
@@ -1108,5 +1175,29 @@
 
     :global(.dark) .fab-btn.recenter {
         color: #0a84ff;
+    }
+
+    /* Navigation FABs */
+    .nav-fab-container {
+        position: absolute;
+        bottom: 120px; /* Above stats bar */
+        right: 45px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        z-index: 5000;
+    }
+
+    .fab-btn.compass-toggle.active {
+        background: #007aff;
+        color: white;
+    }
+
+    .fab-btn.exit-nav {
+        color: #ff3b30;
+    }
+
+    .fab-btn.compass-toggle {
+        transition: transform 0.1s ease-out;
     }
 </style>

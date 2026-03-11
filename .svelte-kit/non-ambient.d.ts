@@ -27,7 +27,7 @@ export {};
 
 declare module "$app/types" {
 	export interface AppTypes {
-		RouteId(): "/" | "/api" | "/api/ai" | "/api/ai/assess-hazards" | "/api/ai/assess-route" | "/api/places" | "/api/places/autocomplete" | "/api/places/details" | "/api/route" | "/api/voice";
+		RouteId(): "/" | "/api" | "/api/ai" | "/api/ai/assess-hazards" | "/api/ai/assess-route" | "/api/route" | "/api/search" | "/api/voice";
 		RouteParams(): {
 			
 		};
@@ -37,14 +37,12 @@ declare module "$app/types" {
 			"/api/ai": Record<string, never>;
 			"/api/ai/assess-hazards": Record<string, never>;
 			"/api/ai/assess-route": Record<string, never>;
-			"/api/places": Record<string, never>;
-			"/api/places/autocomplete": Record<string, never>;
-			"/api/places/details": Record<string, never>;
 			"/api/route": Record<string, never>;
+			"/api/search": Record<string, never>;
 			"/api/voice": Record<string, never>
 		};
-		Pathname(): "/" | "/api/ai/assess-hazards" | "/api/ai/assess-route" | "/api/places/autocomplete" | "/api/places/details" | "/api/route" | "/api/voice";
+		Pathname(): "/" | "/api/ai/assess-hazards" | "/api/ai/assess-route" | "/api/route" | "/api/search" | "/api/voice";
 		ResolvedPathname(): `${"" | `/${string}`}${ReturnType<AppTypes['Pathname']>}`;
-		Asset(): "/manifest.json" | string & {};
+		Asset(): "/manifest.json" | "/pwa-icon.png" | string & {};
 	}
 }
