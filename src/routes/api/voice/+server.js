@@ -8,84 +8,74 @@ export async function GET({ url }) {
     // speaker 3 (Zundamon Normal)
     const speaker = 3;
     
-    const speed = url.searchParams.get('speed') || '1.25';
-    
-    // 1. Try Local VOICEVOX Engine (localhost:50021)
     try {
-        const queryRes = await fetch(`http://localhost:50021/audio_query?text=${encodeURIComponent(text)}&speaker=${speaker}`, { 
-            method: 'POST' 
-        });
+        const encodedText = encodeURIComponent(text);
+        // Added speaker=3 for Zundamon as requested
+        const synthesisUrl = `https://api.tts.quest/v3/voicevox/synthesis?text=${encodedText}&speaker=${speaker}`;
         
-        if (queryRes.ok) {
-            const query = await queryRes.json();
-            
-            // Adjust speed
-            query.speedScale = parseFloat(speed);
-            
-            const synthRes = await fetch(`http://localhost:50021/synthesis?speaker=${speaker}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(query)
-            });
-            
-            if (synthRes.ok) {
-                console.log('Voice Synthesis: Using local engine');
-                const audioData = await synthRes.arrayBuffer();
-                return new Response(audioData, { headers: { 'Content-Type': 'audio/wav' } });
-            }
+        console.log(`[Voice API] Requesting: ${text.substring(0, 20)}...`);
+        const res = await fetch(synthesisUrl);
+        
+        if (!res.ok) {
+            const errorBody = await res.text();
+            console.error(`[Voice API] TTS Quest Initial Request Failed: ${res.status}`, errorBody);
+            throw new Error(`TTS Quest API returned status ${res.status}`);
         }
-    } catch (err) {
-        console.warn('Local VOICEVOX engine not available, trying fallback...');
-    }
 
-    // 2. Try Public API Fallback (Unofficial tts.quest)
-    try {
-        const fallbackUrl = `https://api.tts.quest/v3/voicevox/synthesis?text=${encodeURIComponent(text)}&speaker=${speaker}`;
+        const result = await res.json();
+        console.log(`[Voice API] API Response:`, result);
         
-        console.log('VOICEVOX Fallback: Requesting synthesis...', fallbackUrl);
-        const fallbackRes = await fetch(fallbackUrl);
-        
-        if (fallbackRes.ok) {
-            const result = await fallbackRes.json();
-            if (result.success && result.wavDownloadUrl) {
-                // Polling loop: Upstream might 404 for a few seconds while file is being written
-                // Increased to 30 attempts (15 seconds total) for long sentences
-                let audioData = null;
-                for (let i = 0; i < 30; i++) {
-                    console.log(`VOICEVOX Fallback: Fetching audio (Attempt ${i+1}/30)...`);
-                    try {
-                        const audioRes = await fetch(result.wavDownloadUrl);
-                        if (audioRes.ok) {
-                            audioData = await audioRes.arrayBuffer();
-                            break;
-                        }
-                        if (audioRes.status === 404) {
-                            await new Promise(r => setTimeout(r, 500));
-                            continue;
-                        }
-                    } catch (e) {
-                        console.warn(`Attempt ${i+1} failed:`, e.message);
+        if (result.success && result.wavDownloadUrl) {
+            let audioData = null;
+            const maxAttempts = 30; // Increased polling
+            
+            for (let i = 0; i < maxAttempts; i++) {
+                console.log(`[Voice API] Polling audio (Attempt ${i + 1}/${maxAttempts})...`);
+                try {
+                    const audioRes = await fetch(result.wavDownloadUrl);
+                    
+                    if (audioRes.ok) {
+                        audioData = await audioRes.arrayBuffer();
+                        console.log(`[Voice API] Audio retrieved! Size: ${audioData.byteLength} bytes`);
+                        break;
                     }
-                    break; // Other error, stop
+                    
+                    if (audioRes.status === 404) {
+                        await new Promise(r => setTimeout(r, 1000)); // Wait 1s
+                        continue;
+                    }
+                    
+                    console.error(`[Voice API] Audio download error: ${audioRes.status}`);
+                    break;
+                } catch (e) {
+                    console.warn(`[Voice API] Polling fetch error:`, e.message);
+                    await new Promise(r => setTimeout(r, 1000));
                 }
-
-                if (audioData) {
-                    console.log('VOICEVOX Fallback: Successfully fetched audio, size:', audioData.byteLength);
-                    return new Response(audioData, { headers: { 'Content-Type': 'audio/wav' } });
-                } else {
-                    console.error('VOICEVOX Fallback: Polling timed out after 30 attempts.');
-                }
-            } else if (result.retry) {
-                console.warn('VOICEVOX Fallback: API busy, retry in', result.retry, 's');
-                return new Response(JSON.stringify({ error: 'API busy', retry: result.retry }), { status: 503 });
             }
+
+            if (audioData && audioData.byteLength > 0) {
+                return new Response(audioData, {
+                    headers: {
+                        'Content-Type': 'audio/wav',
+                        'Content-Length': audioData.byteLength.toString(),
+                        'Cache-Control': 'public, max-age=3600'
+                    }
+                });
+            } else {
+                throw new Error('Audio generation timed out or returned empty data.');
+            }
+        } else if (result.retry) {
+            console.warn(`[Voice API] API Busy, retry in ${result.retry}s`);
+            throw new Error(`API Busy (Retry in ${result.retry}s)`);
+        } else {
+            console.error(`[Voice API] API returned failure:`, result);
+            throw new Error(result.error || 'TTS Quest API failed to provide download URL');
         }
     } catch (err) {
-        console.error('VOICEVOX Fallback Error:', err);
+        console.error('[Voice API] Final Catch Error:', err.message);
+        return new Response(JSON.stringify({ error: err.message }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+        });
     }
-
-    return new Response(JSON.stringify({ error: 'Failed to synthesize voice after all attempts' }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' }
-    });
 }

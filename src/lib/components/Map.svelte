@@ -256,16 +256,16 @@
             
             if (userLat !== null && userLon !== null) {
                 const startPos = [userLat, userLon];
-                fetchRoute(startPos, destLatLng).then(route => {
+                fetchRoute(startPos, destLatLng).then(fetchedRoute => {
                     if (routeLayer) routeLayer.remove();
                     hazardMarkers.forEach(m => m.remove());
                     hazardMarkers = [];
                     prohibitedLayers.forEach(l => l.remove());
                     prohibitedLayers = [];
                     
-                    if (route) {
+                    if (fetchedRoute) {
                         // Success: Render the road path (Road-Aligned Geometry)
-                        routeLayer = Leaflet.geoJSON(route.geometry, {
+                        routeLayer = Leaflet.geoJSON(fetchedRoute.geometry, {
                             style: {
                                 color: '#007aff',
                                 weight: 8,
@@ -279,16 +279,16 @@
                         });
 
                         // Extract initial hazards
-                        hazards = extractHazards(route);
+                        hazards = extractHazards(fetchedRoute);
                         
                         // AI Assessment (Asynchronous - Route & Hazards)
-                        if (hazards.length > 0 || route.legs) {
+                        if (hazards.length > 0 || fetchedRoute.legs) {
                             fetch('/api/ai/assess-route', {
                                 method: 'POST',
                                 body: JSON.stringify({ 
                                     hazards, 
-                                    routeSteps: route.legs[0].steps,
-                                    fullRoute: route.geometry
+                                    routeSteps: fetchedRoute.legs[0].steps,
+                                    fullRoute: fetchedRoute.geometry
                                 })
                             })
                             .then(res => {
@@ -393,7 +393,7 @@
                         });
 
                         // Distance from OSRM (meters to km)
-                        distance = parseFloat((route.distance / 1000).toFixed(1));
+                        distance = parseFloat((fetchedRoute.distance / 1000).toFixed(1));
                         // Duration: Distance / 30km/h
                         duration = Math.round((distance / 30) * 60);
 
@@ -402,7 +402,7 @@
                                 padding: [50, 50]
                             });
                         }
-            route = route; // Ensure binding updates
+                        route = fetchedRoute; // Ensure binding updates
                     } else {
                         // Fallback to straight line
                         route = null;
