@@ -61,6 +61,8 @@ declare module '$env/static/private' {
 	export const EFC_10480_2775293581: string;
 	export const EFC_10480_3789132940: string;
 	export const EXEPATH: string;
+	export const FPS_BROWSER_APP_PROFILE_STRING: string;
+	export const FPS_BROWSER_USER_PROFILE_STRING: string;
 	export const GIT_ASKPASS: string;
 	export const HOME: string;
 	export const HOMEDRIVE: string;
@@ -259,6 +261,8 @@ declare module '$env/dynamic/private' {
 		EFC_10480_2775293581: string;
 		EFC_10480_3789132940: string;
 		EXEPATH: string;
+		FPS_BROWSER_APP_PROFILE_STRING: string;
+		FPS_BROWSER_USER_PROFILE_STRING: string;
 		GIT_ASKPASS: string;
 		HOME: string;
 		HOMEDRIVE: string;

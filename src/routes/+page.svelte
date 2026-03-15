@@ -32,6 +32,7 @@
     let currentStepIndex = $state(1);
     let hasSpokenAdvance = $state(false);
     let hasSpokenSoon = $state(false);
+    let hasSpokenStraight = $state(false);
     let nextInstructionText = $state('');
     let distanceToNext = $state(0); // in meters
     let isSpeeding = $state(false);
@@ -215,33 +216,55 @@
                             distanceToNext = Math.round(distKm * 1000);
                         }
 
-                        // 2. Translation & UI Text
-                        const translation = translateManeuver(step);
-                        const intersectionName = step.name ? `（${step.name}）` : "";
-                        nextInstructionText = `${translation.text} ${translation.symbol}${intersectionName}`;
-
                         const hazard = hazards.find(h => h.id && h.id.includes(`${targetLat}-${targetLon}`));
+                        const translation = translateManeuver(step);
+                        const direction = translation.text;
+                        const isStraight = direction === '直進' || direction === '道なり';
 
-                        // 3. Voice Guidance - 300m Milestone (Advance)
-                        if (distanceToNext <= 300 && distanceToNext > 50 && !hasSpokenAdvance) {
-                            const voiceText = formatInstruction(step, distanceToNext, hazard);
-                            playZundamon(voiceText);
-                            hasSpokenAdvance = true;
+                        // 3. Translation & UI Text
+                        const intersectionName = step.name ? `（${step.name}）` : "";
+                        if (isStraight) {
+                            nextInstructionText = `直進 ${translation.symbol}${intersectionName}`;
+                        } else {
+                            nextInstructionText = `${translation.text} ${translation.symbol}${intersectionName}`;
                         }
 
-                        // 4. Voice Guidance - 50m Milestone (Immediate)
-                        if (distanceToNext <= 50 && distanceToNext > 20 && !hasSpokenSoon) {
-                            const voiceText = formatInstruction(step, distanceToNext, hazard);
-                            playZundamon(voiceText);
-                            hasSpokenSoon = true;
-                        }
-
-                        // 5. Step Progression (Crossing Threshold: 20m)
-                        if (distanceToNext <= 20) {
+                        // --- Robust prioritized if-else for GPS skip protection ---
+                        if (distanceToNext <= 25) {
+                            // 【交差点通過】
                             console.log(`Zundamon: Stepping to index ${currentStepIndex + 1}`);
                             currentStepIndex = currentStepIndex + 1;
                             hasSpokenAdvance = false;
                             hasSpokenSoon = false;
+                            hasSpokenStraight = false;
+                        } 
+                        else if (distanceToNext <= 50 && !hasSpokenSoon) {
+                            // 【直前案内】
+                            if (isStraight) {
+                                playZundamon("そのまま直進なのだ");
+                            } else {
+                                const roadName = step.name ? `${step.name}へ、` : "";
+                                playZundamon(`まもなく、${roadName}${direction}なのだ`);
+                            }
+                            hasSpokenSoon = true;
+                            hasSpokenAdvance = true; // Prevent double trigger
+                        } 
+                        else if (distanceToNext <= 300 && !hasSpokenAdvance) {
+                            // 【事前案内】
+                            const spokenDistance = Math.round(distanceToNext / 10) * 10;
+                            if (isStraight) {
+                                playZundamon(`およそ${spokenDistance}メートル、直進なのだ`);
+                            } else {
+                                const roadName = step.name ? `${step.name}へ、` : "";
+                                playZundamon(`およそ${spokenDistance}メートル先、${roadName}${direction}なのだ`);
+                            }
+                            hasSpokenAdvance = true;
+                        }
+
+                        // 4. "Continue Straight" Logic (Google Maps style)
+                        if (distanceToNext >= 800 && !hasSpokenStraight && !hasSpokenSoon && !hasSpokenAdvance) {
+                            playZundamon("この先、しばらく道なりなのだ");
+                            hasSpokenStraight = true;
                         }
                     }
                 }
@@ -358,6 +381,8 @@
         currentStepIndex = 1; // Start from first maneuver
         hasSpokenAdvance = false;
         hasSpokenSoon = false;
+        hasSpokenStraight = false;
+        recenterToken += 1; // Trigger map focus
         playZundamon("安全運転で、案内を開始するのだ！実際の交通規制に、従うのだ！");
     }
 
@@ -373,6 +398,7 @@
         currentStepIndex = 1; // Reset progression
         hasSpokenAdvance = false;
         hasSpokenSoon = false;
+        hasSpokenStraight = false;
         isHeadingUp = false; // Reset rotation to North-up
         activeHazard = null;
         activeProhibitedSection = null;
@@ -445,7 +471,11 @@
                 </div>
                 <div class="guidance-text">
                     <span class="guidance-main">
-                        {formatDistance(distanceToNext)}先、{nextInstructionText || '道なり'}
+                        {#if nextInstructionText.includes('直進')}
+                            {Math.round(distanceToNext)}m {nextInstructionText}
+                        {:else}
+                            {formatDistance(distanceToNext)}先、{nextInstructionText || '道なり'}
+                        {/if}
                     </span>
                     {#if routeSteps[currentStepIndex]?.name}
                         <span class="guidance-subtext">{routeSteps[currentStepIndex].name}</span>
@@ -471,9 +501,14 @@
                 </div>
 
                 <!-- Live Speedometer -->
-                <div class="nav-speedometer" class:is-speeding={isSpeeding}>
-                    <span class="speed-val">{Math.round(currentSpeed * 3.6)}</span>
-                    <span class="speed-unit">km/h</span>
+                <div class="nav-speed-container">
+                    <div class="nav-debug-info">
+                        [ 距離: {Math.round(distanceToNext)}m | 300m前: {hasSpokenAdvance ? '済' : '未'} | 50m前: {hasSpokenSoon ? '済' : '未'} ]
+                    </div>
+                    <div class="nav-speedometer" class:is-speeding={isSpeeding}>
+                        <span class="speed-val">{Math.round(currentSpeed * 3.6)}</span>
+                        <span class="speed-unit">km/h</span>
+                    </div>
                 </div>
 
                 <button class="nav-exit-btn" onclick={cancelRoute}>終了</button>
@@ -767,6 +802,20 @@
         font-size: 14px;
         font-weight: 700;
         cursor: pointer;
+    }
+
+    .nav-speed-container {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 4px;
+    }
+
+    .nav-debug-info {
+        font-size: 10px;
+        color: #8e8e93;
+        font-family: monospace;
+        white-space: nowrap;
     }
 
     .nav-speedometer {
